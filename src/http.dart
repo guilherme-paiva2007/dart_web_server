@@ -21,7 +21,7 @@ class Server {
                 onReady(this);
             }
             print("Listening on http://${server.address.host}:${server.port}");
-            server.listen((HttpRequest request) {
+            server.listen((HttpRequest request) async {
                 print("Request: ${request.method} ${request.uri}");
                 request.response
                     ..statusCode = 200
