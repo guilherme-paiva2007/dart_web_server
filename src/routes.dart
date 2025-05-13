@@ -1,4 +1,8 @@
+import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
+import 'package:mime/mime.dart';
+
 import "coded_error.dart";
 import 'http.dart';
 
@@ -52,18 +56,113 @@ class RoutePath {
     }
 }
 
+List<int> _requestFold(List<int> previous, Uint8List element) => previous..addAll(element);
+RegExp _multipartNameRegexp = RegExp(r'name="([^"]+)"');
+RegExp _multipartFilenameRegexp = RegExp(r'filename="([^"]+)"');
+
+abstract class _MimeMultipartData {
+    String name;
+
+    _MimeMultipartData(this.name);
+}
+
+class _MimeMultipartField extends _MimeMultipartData {
+    String value;
+
+    _MimeMultipartField(super.name, this.value);
+}
+
+class _MimeMultipartFile extends _MimeMultipartData {
+    ContentType contentType;
+    List<int> content;
+    String filename;
+
+    _MimeMultipartFile(super.name, this.contentType, this.content, this.filename);
+}
+
+class RequestBody {
+    final ContentType contentType;
+    final List<int> _content;
+
+    const RequestBody._create(this.contentType, this._content);
+
+    static Future<RequestBody> fromRequest(HttpRequest request) async {
+        ContentType contentType = request.headers.contentType ?? ContentType("text", "plain", charset: "utf-8");
+        List<int> body = await request.fold<List<int>>([], _requestFold);
+        return RequestBody._create(contentType, body);
+    }
+
+    dynamic json() {
+        if (contentType.mimeType != "application/json") {
+            throw ArgumentError("Content type is not JSON: ${contentType.mimeType}");
+        }
+        return jsonDecode(utf8.decode(_content));
+    }
+
+    String text() {
+        return utf8.decode(_content);
+    }
+
+    List<int> bytes() {
+        return _content;
+    }
+
+    Map<String, String> form() {
+        if (contentType.mimeType != "application/x-www-form-urlencoded") {
+            throw ArgumentError("Content type is not form: ${contentType.mimeType}");
+        }
+        return Uri.splitQueryString(utf8.decode(_content));
+    }
+
+    Future<Map<String, _MimeMultipartData>> multipart() async {
+        if (contentType.mimeType != "multipart/form-data") {
+            throw ArgumentError("Content type is not multipart: ${contentType.mimeType}");
+        }
+        String boundary = contentType.parameters["boundary"] ?? "";
+        if (boundary.isEmpty) {
+            throw ArgumentError("Missing boundary in multipart content type: ${contentType.mimeType}");
+        }
+        var transformer = MimeMultipartTransformer(boundary);
+        var stream = Stream.fromIterable([_content]);
+
+        Map<String, _MimeMultipartData> parts = {};
+        await for (var part in transformer.bind(stream)) {
+            var contentDisposition = part.headers['content-disposition'];
+            if (contentDisposition != null && _multipartFilenameRegexp.hasMatch(contentDisposition)) {
+                String name = _multipartNameRegexp.firstMatch(contentDisposition)?.group(1) ?? "unknown";
+                String filename = _multipartFilenameRegexp.firstMatch(contentDisposition)?.group(1) ?? "unknown";
+                List<int> fileContent = await part.toList().then((chunks) => chunks.expand((chunk) => chunk).toList());
+
+                parts[name] = _MimeMultipartFile(
+                    name,
+                    ContentType.parse(part.headers['content-type'] ?? 'application/octet-stream'),
+                    fileContent,
+                    filename
+                );
+            } else if (contentDisposition != null) {
+                String fieldValue = await utf8.decoder.bind(part).join();
+                String fieldName = _multipartNameRegexp.firstMatch(contentDisposition)?.group(1) ?? "unknown";
+
+                parts[fieldName] = _MimeMultipartField(fieldName, fieldValue);
+            }
+        }
+
+        return parts;
+    }
+}
+
 class LoadingParameters {
-    var server;
-    HttpRequest? request;
-    HttpResponse? response;
-    Route? route;
-    RoutePath? path;
-    var content;
-    var session;
-    Map<String, String>? query;
-    var body;
-    var params;
-    Map localhooks = {};
+    final Server server;
+    final HttpRequest request;
+    final HttpResponse response;
+    final Route route;
+    final RoutePath path;
+    final LoadingContent? content;
+    HttpSession get session => request.session;
+    final Map<String, String> query;
+    final RequestBody body;
+    final Map<String, String> params;
+    final Map localhooks = {};
     CodedError? error;
 
     LoadingParameters._create({
@@ -73,30 +172,27 @@ class LoadingParameters {
         required this.route,
         required this.path,
         required this.content,
-        required this.session,
         required this.query,
+        required this.body,
         required this.params,
     });
 
-    factory LoadingParameters(
+    static Future<LoadingParameters> create(
         Server server,
         HttpRequest request,
         Route route,
         RoutePath path,
         Map<String, String> params
-    ) {
-        HttpResponse response = request.response;
-        Map<String, String>? query = request.uri.queryParameters;
-
+    ) async {
         return LoadingParameters._create(
             server: server,
             request: request,
-            response: response,
+            response: request.response,
             route: route,
             path: path,
             content: LoadingContent(),
-            session: request.session,
-            query: query,
+            query: request.uri.queryParameters,
+            body: await RequestBody.fromRequest(request),
             params: params
         );
     }
@@ -137,14 +233,18 @@ class LoadingContent {
         }
     }
 
-    void _sendArea(List area) {
+    void _sendArea(List area, HttpResponse response) {
         for (var part in area) {
             if (part is String) {
-                print(part);
+                response.write(part);
             } else if (part is List<int>) {
-                print(part);
+                response.add(part);
             } else if (part is Stream<List<int>>) {
-                part.listen((data) => print(data));
+                response.addStream(part).catchError((e) {
+                    print("Error sending stream: $e");
+                });
+            } else if (part is Uint8List) {
+                response.add(part);
             } else {
                 throw ArgumentError("Invalid content type: ${part.runtimeType}");
             }
@@ -155,9 +255,9 @@ class LoadingContent {
         if (contentType != null && response.headers.contentType != null) response.headers.contentType = contentType!;
         if (statusCode != null) response.statusCode = statusCode!;
 
-        if (_before.isNotEmpty) _sendArea(_before);
-        if (_body.isNotEmpty) _sendArea(_body);
-        if (_after.isNotEmpty) _sendArea(_after);
+        if (_before.isNotEmpty) _sendArea(_before, response);
+        if (_body.isNotEmpty) _sendArea(_body, response);
+        if (_after.isNotEmpty) _sendArea(_after, response);
         
         response.close();
     }
@@ -192,8 +292,12 @@ abstract class Route {
 
     _open(LoadingParameters parameters);
 
+    _process(LoadingParameters parameters) async {
+        return await _open(parameters);
+    }
+
     Future load(LoadingParameters parameters) async {
-        return await _open(parameters); // mudar para adicionar a um LoadingContent
+        return await _process(parameters); // mudar para adicionar a um LoadingContent
     }
 
     RouteMatch? match(Uri uri) {
@@ -227,7 +331,9 @@ class ScreenRoute extends Route {
         required ContentType contentType,
     }): super(paths: paths, file: file, contentType: contentType);
 
-    _open(parameters) {}
+    Future<String> _open(parameters) async {
+        return await file.readAsString(encoding: utf8);
+    }
 }
 
 class AssetRoute extends Route {
@@ -260,4 +366,83 @@ class RestRoute extends Route {
     _open(parameters) {}
 }
 
-class Router {}
+class WebSocketRoute extends Route {
+    WebSocketRoute({
+        required List<String> paths,
+        required File file,
+        required ContentType contentType,
+    }): super(paths: paths, file: file, contentType: contentType);
+
+    _open(parameters) {}
+
+    // adicionar um meio de rotas websocket coexistirem com rotas normais no mesmo caminho;
+}
+
+
+class Router {
+    Set<Route> _routes = <Route>{};
+    Set<WebSocketRoute> _wsRoutes = <WebSocketRoute>{};
+
+    bool _addWebSocketRoute(WebSocketRoute route) {
+        for (var path in route.paths) {
+            if (match(Uri(path: path.raw)) != null) {
+                throw ArgumentError("WebSocket route already exists: ${path.raw}");
+            }
+        }
+        return _wsRoutes.add(route);
+    }
+
+    bool add(Route route) {
+        if (route is WebSocketRoute) return _addWebSocketRoute(route);
+        for (var path in route.paths) {
+            if (match(Uri(path: path.raw)) != null) {
+                throw ArgumentError("Route already exists: ${path.raw}");
+            }
+        }
+        return _routes.add(route);
+    }
+
+    bool remove(Route route) {
+        if (route is WebSocketRoute) return _wsRoutes.remove(route);
+        return _routes.remove(route);
+    }
+
+    bool has(Route route) => _routes.contains(route) || _wsRoutes.contains(route);
+
+    void clear() {
+        _routes.clear();
+        _wsRoutes.clear();
+    }
+
+    List<Route> toList() => _routes.toList();
+
+    List<WebSocketRoute> webSocketsToList() => _wsRoutes.toList();
+
+    RouteMatch? match(Uri uri) {
+        for (var route in _routes) {
+            RouteMatch? match = route.match(uri);
+            if (match != null) return match;
+        }
+        return null;
+    }
+
+    load(HttpRequest request, Server server) async {
+        Uri uri = request.uri;
+        RouteMatch? match = this.match(uri);
+        if (match == null) {
+            request.response.statusCode = HttpStatus.notFound;
+            request.response.write("Not found");
+            request.response.close();
+            return;
+        }
+        LoadingParameters parameters = await LoadingParameters.create(
+            server,
+            request,
+            match.route,
+            match.path,
+            match.params
+        );
+
+        // TODO
+    }
+}

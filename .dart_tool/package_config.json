@@ -1,0 +1,21 @@
+{
+  "configVersion": 2,
+  "packages": [
+    {
+      "name": "mime",
+      "rootUri": "file:///C:/Users/USER/AppData/Local/Pub/Cache/hosted/pub.dev/mime-2.0.0",
+      "packageUri": "lib/",
+      "languageVersion": "3.2"
+    },
+    {
+      "name": "web_server",
+      "rootUri": "../",
+      "packageUri": "lib/",
+      "languageVersion": "3.7"
+    }
+  ],
+  "generated": "2025-05-09T22:07:46.207149Z",
+  "generator": "pub",
+  "generatorVersion": "3.7.2",
+  "pubCache": "file:///C:/Users/USER/AppData/Local/Pub/Cache"
+}

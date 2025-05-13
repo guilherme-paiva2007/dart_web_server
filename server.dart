@@ -1,9 +1,9 @@
 import 'src/http.dart';
 
 late Server _server;
-bool serverReady = false;
+bool _serverReady = false;
 Server get server {
-    if (!serverReady) {
+    if (!_serverReady) {
         throw Exception("Server not ready yet.");
     }
     return _server;
@@ -11,6 +11,6 @@ Server get server {
 
 Future startServer() async {
     _server = Server(
-        onReady: (Server server) => serverReady = true
+        onReady: (Server server) => _serverReady = true
     );
 }

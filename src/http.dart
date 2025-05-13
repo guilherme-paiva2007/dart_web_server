@@ -11,7 +11,7 @@ class Server {
         return _http;
     }
 
-    Router routes = Router();
+    Router router = Router();
 
     Server({ Function(Server server)? onReady }) {
         HttpServer.bind(InternetAddress.anyIPv4, 8080).then((server) {

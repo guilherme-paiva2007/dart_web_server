@@ -30,6 +30,7 @@ class Cache<K, V> {
     }
 
     void set(K key, V value) {
+        if (!enabled) return;
         _cache[key] = value;
         _expirationTimes[key] = DateTime.now().add(expirationDuration);
     }

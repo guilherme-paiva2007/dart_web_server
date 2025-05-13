@@ -1,0 +1,8 @@
+name: web_server
+description: A Dart web server.
+version: 1.0.0
+
+environment:
+  sdk: 3.7.2
+dependencies:
+  mime: ^2.0.0
