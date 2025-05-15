@@ -157,13 +157,34 @@ class LoadingParameters {
     final HttpResponse response;
     final Route route;
     final RoutePath path;
-    final LoadingContent? content;
+    final LoadingContent content;
     HttpSession get session => request.session;
     final Map<String, String> query;
     final RequestBody body;
     final Map<String, String> params;
     final Map localhooks = {};
-    CodedError? error;
+    late final CodedError _error;
+    bool _hasError = false;
+    CodedError? get error {
+        if (_hasError) return _error; else return null;
+    }
+    void set error(CodedError? error) {
+        if (error != null) {
+            _error = error;
+            _hasError = true;
+        }
+    }
+    late final WebSocket? _socket;
+    bool _hasSocket = false;
+    WebSocket? get socket {
+        if (_hasSocket) return _socket; else return null;
+    }
+    void set socket(WebSocket? socket) {
+        if (socket != null) {
+            _socket = socket;
+            _hasSocket = true;
+        }
+    }
 
     LoadingParameters._create({
         required this.server,
@@ -198,15 +219,17 @@ class LoadingParameters {
     }
 }
 
-enum LoadingContentAreas { before, after, body }
+enum LoadingContentAreas { before, after, body, headers }
 
 class LoadingContent {
     List<Object> _before = [];
     List<Object> _after = [];
     List<Object> _body = [];
+    Map<String, HeaderValue> _headers = {};
 
     ContentType? contentType;
     int? statusCode;
+    bool headersSent = false;
 
     LoadingContent({
         this.contentType,
@@ -230,7 +253,24 @@ class LoadingContent {
             case LoadingContentAreas.body:
                 _body.add(chunk);
                 break;
+            default:
+                break;
         }
+    }
+
+    void setHeader(String name, HeaderValue header) {
+        if (headersSent) print("Headers already sent, cannot send $header");
+        _headers[name] = header;
+    }
+
+    void _sendHeaders(HttpResponse response) {
+        if (headersSent) return;
+        if (contentType != null && response.headers.contentType != null) response.headers.contentType = contentType!;
+        if (statusCode != null) response.statusCode = statusCode!;
+        for (var header in _headers.entries) {
+            response.headers.set(header.key, header.value);
+        }
+        headersSent = true;
     }
 
     void _sendArea(List area, HttpResponse response) {
@@ -252,8 +292,9 @@ class LoadingContent {
     }
 
     void send(HttpResponse response) {
-        if (contentType != null && response.headers.contentType != null) response.headers.contentType = contentType!;
-        if (statusCode != null) response.statusCode = statusCode!;
+        _sendHeaders(response);
+
+        headersSent = true;
 
         if (_before.isNotEmpty) _sendArea(_before, response);
         if (_body.isNotEmpty) _sendArea(_body, response);
@@ -297,15 +338,17 @@ abstract class Route {
     }
 
     Future load(LoadingParameters parameters) async {
-        return await _process(parameters); // mudar para adicionar a um LoadingContent
+        var content = await _process(parameters);
+        parameters.content.append(content);
+        return content;
     }
 
     RouteMatch? match(Uri uri) {
         for (var path in paths) {
-            if (path.regexp.hasMatch(uri.path)) {
-                Map<String, String> params = {};
+            RegExpMatch? match = path.regexp.firstMatch(uri.path);
 
-                RegExpMatch match = path.regexp.firstMatch(uri.path)!;
+            if (match != null) {
+                Map<String, String> params = {};
                 
                 for (var i = 0; i < path.params.length; i++) {
                     String paramName = path.params[i];
@@ -331,6 +374,7 @@ class ScreenRoute extends Route {
         required ContentType contentType,
     }): super(paths: paths, file: file, contentType: contentType);
 
+    @override
     Future<String> _open(parameters) async {
         return await file.readAsString(encoding: utf8);
     }
@@ -343,7 +387,17 @@ class AssetRoute extends Route {
         required ContentType contentType,
     }): super(paths: paths, file: file, contentType: contentType);
 
-    _open(parameters) {}
+    @override
+    Stream<List<int>> _open(parameters) {
+        return file.openRead();
+    }
+    
+    @override
+    _process(LoadingParameters parameters) {
+        parameters.content._sendHeaders(parameters.response);
+        parameters.response.addStream(_open(parameters));
+        return;
+    }
 }
 
 class ExecutableRoute extends Route {
@@ -353,6 +407,7 @@ class ExecutableRoute extends Route {
         required ContentType contentType,
     }): super(paths: paths, file: file, contentType: contentType);
 
+    @override
     _open(parameters) {}
 }
 
@@ -363,16 +418,20 @@ class RestRoute extends Route {
         required ContentType contentType,
     }): super(paths: paths, file: file, contentType: contentType);
 
+    @override
     _open(parameters) {}
 }
 
 class WebSocketRoute extends Route {
-    WebSocketRoute({
+    HttpServer socket;
+
+    WebSocketRoute(this.socket, {
         required List<String> paths,
         required File file,
         required ContentType contentType,
     }): super(paths: paths, file: file, contentType: contentType);
 
+    @override
     _open(parameters) {}
 
     // adicionar um meio de rotas websocket coexistirem com rotas normais no mesmo caminho;
@@ -418,17 +477,25 @@ class Router {
 
     List<WebSocketRoute> webSocketsToList() => _wsRoutes.toList();
 
-    RouteMatch? match(Uri uri) {
-        for (var route in _routes) {
-            RouteMatch? match = route.match(uri);
-            if (match != null) return match;
+    RouteMatch? match(Uri uri, [bool socket = false]) {
+        if (socket) {
+            for (var route in _wsRoutes) {
+                RouteMatch? match = route.match(uri);
+                if (match != null) return match;
+            }
+        } else {
+            for (var route in _routes) {
+                RouteMatch? match = route.match(uri);
+                if (match != null) return match;
+            }
         }
         return null;
     }
 
     load(HttpRequest request, Server server) async {
         Uri uri = request.uri;
-        RouteMatch? match = this.match(uri);
+        bool isSocket = WebSocketTransformer.isUpgradeRequest(request);
+        RouteMatch? match = this.match(uri, isSocket);
         if (match == null) {
             request.response.statusCode = HttpStatus.notFound;
             request.response.write("Not found");
@@ -443,6 +510,21 @@ class Router {
             match.params
         );
 
-        // TODO
+        try {
+            if (isSocket) {
+                final WebSocket socket = await WebSocketTransformer.upgrade(request);
+                parameters.socket = socket;
+
+                socket.listen((data) {
+                    
+                });
+            } else {
+
+            }
+        } on CodedError {
+
+        } on Exception {
+
+        }
     }
 }

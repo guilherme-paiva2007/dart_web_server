@@ -22,7 +22,9 @@ class Server {
             }
             print("Listening on http://${server.address.host}:${server.port}");
             server.listen((HttpRequest request) async {
-                print("Request: ${request.method} ${request.uri}");
+                // print("Request: ${request.method} ${request.uri}");
+
+                
                 request.response
                     ..statusCode = 200
                     ..write("Hello, world!")

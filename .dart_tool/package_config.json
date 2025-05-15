@@ -3,7 +3,7 @@
   "packages": [
     {
       "name": "mime",
-      "rootUri": "file:///C:/Users/USER/AppData/Local/Pub/Cache/hosted/pub.dev/mime-2.0.0",
+      "rootUri": "file:///C:/Users/Guilherme/AppData/Local/Pub/Cache/hosted/pub.dev/mime-2.0.0",
       "packageUri": "lib/",
       "languageVersion": "3.2"
     },
@@ -14,8 +14,10 @@
       "languageVersion": "3.7"
     }
   ],
-  "generated": "2025-05-09T22:07:46.207149Z",
+  "generated": "2025-05-15T14:35:05.539701Z",
   "generator": "pub",
   "generatorVersion": "3.7.2",
-  "pubCache": "file:///C:/Users/USER/AppData/Local/Pub/Cache"
+  "flutterRoot": "file:///C:/Users/Guilherme/dev/flutter",
+  "flutterVersion": "3.29.2",
+  "pubCache": "file:///C:/Users/Guilherme/AppData/Local/Pub/Cache"
 }
